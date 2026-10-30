@@ -1,46 +1,61 @@
 #!/usr/bin/env python
-"""PreToolUse hook: stop shell commands that could reach beyond this repo.
+"""PreToolUse hook: stop tool calls that could reach beyond this repo.
 
-Reads the hook event on stdin and exits 2 to block the command. It catches
-mistakes, not an attacker: nothing here deploys, so nothing an agent runs
-should need to publish, change a remote or touch another project.
+Reads the hook event on stdin and exits 2 to block the call. Shell commands are
+checked for everyone. File edits are checked for subagents, which may write only
+in job worktrees and job folders. It catches mistakes, not an attacker: nothing
+here deploys, so nothing an agent runs should need to publish, change a remote
+or touch another project.
 """
 
 import json
 import re
 import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
 DENY = [
     (r"\b(wrangler|vercel|netlify|firebase|flyctl|heroku|surge|gh-pages|gcloud|aws)\b", "hosting and cloud tools"),
-    (r"\bgh\s+(repo|secret|variable|workflow|run|release|auth|gist|ssh-key|gpg-key|api)\b", "GitHub commands the factory doesn't need"),
-    (r"\bgh\s+pr\s+(merge|close)\b", "merging: only `factory/bin/job merge` merges"),
     (r"\bgit\b.*\bremote\s+(add|set-url|rename|remove)\b", "changing git remotes"),
+    (r"\bremote\.\S+\.(push)?url\b|\binsteadof\b", "changing git remotes"),
     (r"\b(izz-ro|izz\.ro|publimag|nishiai|ramanul\.github\.io)\b", "another project"),
     (r"\b(scp|sftp|rsync|ssh)\b", "copying files to another machine"),
 ]
-PUSH = re.compile(r"\bgit\b(?:\s+-\S+(?:\s+\S+)?)*\s+push\b(.*)")
-BRANCH = re.compile(r"factory/[\w./-]+")
+PUSH = re.compile(r"\bgit((?:\s+-\S+(?:\s+[^-\s]\S*)?)*)\s+push\b([^|;&\n]*)")
+PLAIN_PUSH = re.compile(r"(?:\s+(?:-u|--set-upstream))?\s+origin\s+factory/[\w./-]+\s*")
+GH = re.compile(r"(?:^|[\s;&|(])gh\s+([^|;&\n]*)")
+GH_ALLOWED = re.compile(r"(pr\s+(create|view|list|diff)|issue\s+(create|view|list))\b")
+EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 
 def refusal(command):
     for pattern, why in DENY:
         if re.search(pattern, command, re.I):
             return why
-    for part in re.split(r"&&|\|\||;|\||\n", command):
-        m = PUSH.search(part)
-        if not m:
-            continue
-        args = m.group(1).split()
-        targets = [a for a in args if not a.startswith("-")]
-        forced = any(a.startswith(("--force", "--mirror", "--all", "--tags", "-f")) for a in args)
-        if forced or len(targets) != 2 or targets[0] != "origin" or not BRANCH.fullmatch(targets[1]):
+    for m in PUSH.finditer(command):
+        if m.group(1).strip() or not PLAIN_PUSH.fullmatch(m.group(2)):
             return "pushing anything but `git push origin factory/<job-id>`"
+    for m in GH.finditer(command):
+        if not GH_ALLOWED.match(m.group(1)):
+            return "a GitHub command the factory doesn't need; only `factory/bin/job` merges"
     return None
+
+
+def outside(path, cwd):
+    """True when a subagent's edit lands outside the job worktrees and job folders."""
+    target = (Path(cwd or ".") / path).resolve()
+    roots = (ROOT.parent / f"{ROOT.name}-factory", ROOT / "factory" / "jobs")
+    return not any(target.is_relative_to(root.resolve()) for root in roots)
 
 
 def main():
     event = json.load(sys.stdin)
-    why = refusal(event.get("tool_input", {}).get("command", ""))
+    tool_input = event.get("tool_input", {})
+    why = refusal(tool_input.get("command", ""))
+    if event.get("agent_id") and event.get("tool_name") in EDIT_TOOLS:
+        path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if outside(path, event.get("cwd")):
+            why = f"an edit outside the job's worktree and folder: {path}"
     if why:
         print(f"Blocked by factory/bin/guard: {why}.", file=sys.stderr)
         sys.exit(2)

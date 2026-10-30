@@ -120,6 +120,29 @@ class GateTest(Sandbox):
         self.commit("wrangler.toml", "name = 'x'\n")
         self.assertEqual(self.script("gate", "001-test").returncode, 1)
 
+    def test_a_diacritic_in_the_name_does_not_hide_a_workflow(self):
+        self.commit("hello.txt")
+        self.commit(".github/workflows/publică.yml", "on: push\n")
+        self.assertEqual(self.script("gate", "001-test").returncode, 1)
+
+    def test_case_does_not_hide_a_workflow(self):
+        self.commit("hello.txt")
+        self.commit(".GitHub/workflows/x.yml", "on: push\n")
+        self.assertEqual(self.script("gate", "001-test").returncode, 1)
+
+    def test_renaming_onto_a_protected_path_fails(self):
+        self.commit("hello.txt")
+        git(self.worktree, "rm", "-q", "factory/checks.sh")
+        git(self.worktree, "commit", "-q", "-m", "drop")
+        self.assertEqual(self.script("gate", "001-test").returncode, 1)
+
+    def test_the_hook_ignores_a_transcript_without_a_job(self):
+        transcript = self.tmp / "t.jsonl"
+        transcript.write_text('{"type": "summary"}\n', encoding="utf-8")
+        event = json.dumps({"transcript_path": str(transcript)})
+        res = run([sys.executable, str(self.repo / "factory" / "bin" / "gate"), "--hook"], self.repo, input=event)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_a_new_ordinary_file_passes(self):
         self.commit("hello.txt")
         self.commit("tool/notes.txt")
@@ -144,6 +167,7 @@ class ArgonTest(Sandbox):
     def test_a_reply_with_romanian_and_quotes_survives(self):
         self.commit("hello.txt", 'diacritice ăîșțâ și "ghilimele"\n')
         self.fake_tool('import sys\nfrom pathlib import Path\n'
+                       'print("[Argon Maximum, verificat pe pagină]:")\n'
                        'sys.stdout.reconfigure(encoding="utf-8")\n'
                        'text = Path(sys.argv[sys.argv.index("--fisier") + 1]).read_text(encoding="utf-8")\n'
                        'print("răspuns ăîșțâ" if "ghilimele" in text and "ăîșțâ" in text else "diff pierdut")\n')
@@ -151,6 +175,11 @@ class ArgonTest(Sandbox):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(self.argon_md().startswith("ARGON: REPLIED"), self.argon_md())
         self.assertIn("răspuns ăîșțâ", self.argon_md())
+
+    def test_a_reply_without_proof_of_maximum_does_not_count(self):
+        self.fake_tool('print("raspuns de la alt model")\n')
+        self.assertEqual(self.script("argon", "001-test").returncode, 0)
+        self.assertTrue(self.argon_md().startswith("ARGON: UNAVAILABLE"))
 
     def test_a_failing_tool_reports_unavailable(self):
         self.fake_tool('import sys\nsys.exit(2)\n')
@@ -248,6 +277,8 @@ class GuardTest(unittest.TestCase):
         "gh issue create --label factory --title x --body y",
         "python factory/bin/job queue",
         "bash factory/checks.sh",
+        'git commit -m "explain the push rule"',
+        "gh pr view 7",
     ]
     BLOCKED = [
         "git push",
@@ -269,6 +300,16 @@ class GuardTest(unittest.TestCase):
         "gh workflow run deploy.yml",
         "gh auth token",
         "scp file host:/var/www",
+        "git push -uf origin factory/001",
+        "git push --repo=https://github.com/x/y origin factory/001",
+        "git push --delete origin factory/001",
+        "git push -d origin factory/001",
+        "git -C C:/alt push origin factory/001",
+        "git config remote.origin.url https://github.com/x/y",
+        "git config url.https://x.insteadOf https://github.com",
+        "gh -R x/y pr merge 1",
+        "gh pr review 1 --approve",
+        "gh issue edit 1 --remove-label factory",
     ]
 
     def verdict(self, command):
@@ -287,10 +328,28 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(res.returncode, 2, command)
                 self.assertIn("Blocked by factory/bin/guard", res.stderr)
 
+    def edit(self, tool, path, agent="a1"):
+        event = {"tool_name": tool, "tool_input": {"file_path": path}, "agent_id": agent, "cwd": str(ROOT)}
+        return subprocess.run([sys.executable, str(BIN / "guard")], input=json.dumps(event), capture_output=True,
+                              text=True)
+
+    def test_agents_edit_only_worktrees_and_job_folders(self):
+        worktree = f"{ROOT.parent}/{ROOT.name}-factory/001-x/app.py"
+        self.assertEqual(self.edit("Write", worktree).returncode, 0)
+        self.assertEqual(self.edit("Edit", f"{ROOT}/factory/jobs/001-x/build.md").returncode, 0)
+        for path in (f"{ROOT}/factory/config.json", f"{ROOT}/.claude/settings.json", "../izz/x.py",
+                     f"{worktree}/../../../elsewhere.py"):
+            with self.subTest(path):
+                self.assertEqual(self.edit("Write", path).returncode, 2)
+
+    def test_the_main_session_can_still_edit(self):
+        self.assertEqual(self.edit("Write", f"{ROOT}/factory/config.json", agent=None).returncode, 0)
+
     def test_settings_wire_the_guard(self):
         settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
         hook = settings["hooks"]["PreToolUse"][0]
-        self.assertIn("Bash", hook["matcher"])
+        for tool in ("Bash", "Write", "Edit"):
+            self.assertIn(tool, hook["matcher"])
         self.assertIn("factory/bin/guard", hook["hooks"][0]["command"])
 
 

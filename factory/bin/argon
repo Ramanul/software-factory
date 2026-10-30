@@ -21,6 +21,7 @@ CONFIG = json.loads((FACTORY / "config.json").read_text(encoding="utf-8"))
 LOCAL = FACTORY / "argon.local.json"
 TIMEOUT = 900
 MAX_DIFF = 60000
+PROOF = "Argon Maximum"  # the owner's rule: only this level counts, shown by the tool
 
 
 def write_request(job, round_dir):
@@ -39,18 +40,21 @@ def write_request(job, round_dir):
 def ask(command, request):
     """The reply, or None and the reason."""
     proc = subprocess.Popen([*command, "--fisier", str(request), "--timeout", "540"],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                             errors="replace", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     try:
-        out, _ = proc.communicate(timeout=TIMEOUT)
+        out, err = proc.communicate(timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         # The tool waits for Gemini's limit to reset, so take its child with it.
         if os.name == "nt":
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
         proc.kill()
+        proc.communicate()
         return None, f"no reply in {TIMEOUT}s"
     if proc.returncode != 0:
-        return None, f"exit {proc.returncode}: {out.strip()[-300:]}"
+        return None, f"exit {proc.returncode}: {(err or out).strip()[-300:]}"
+    if PROOF not in out:
+        return None, f"no proof of `{PROOF}` in the reply, so it doesn't count"
     return out.strip(), None
 
 

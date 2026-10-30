@@ -16,6 +16,7 @@ under `blocked_paths`, which a job may not touch at all.
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -42,23 +43,22 @@ def git(worktree, *args):
 
 
 def matches(path, patterns):
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+    # Windows filesystems ignore case, so `.GitHub/` must not slip past `.github/*`.
+    return any(fnmatch.fnmatchcase(path.lower(), pattern.lower()) for pattern in patterns)
 
 
 def protected_changes(worktree):
     """Files under blocked_paths the branch touched, and protected_paths it changed."""
-    diff = git(worktree, "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
+    # -z keeps paths unquoted, so a diacritic in a name can't hide it from the patterns.
+    fields = git(worktree, "diff", "-z", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD").split("\0")
     hits = []
-    for line in diff.splitlines():
-        status, *paths = line.split("\t")
-        if matches(paths[-1], CONFIG["blocked_paths"]):
+    while len(fields) > 1:
+        status = fields.pop(0)
+        paths = [fields.pop(0) for _ in range(2 if status[0] in "RC" else 1)]
+        if any(matches(p, CONFIG["blocked_paths"]) for p in paths):
             hits.append(f"{status[0]} {paths[-1]} (blocked)")
-            continue
-        if status.startswith("A"):
-            continue
-        old = paths[0]  # for renames and copies, the original path
-        if matches(old, CONFIG["protected_paths"]):
-            hits.append(f"{status[0]} {old}")
+        elif status[0] != "A" and any(matches(p, CONFIG["protected_paths"]) for p in paths):
+            hits.append(f"{status[0]} {paths[0]}")
     return hits
 
 
@@ -109,11 +109,12 @@ def hook():
     event = json.load(sys.stdin)
     if event.get("stop_hook_active"):
         sys.exit(0)  # one nudge per stop; the gate decides
-    with open(Path(event["agent_transcript_path"]).expanduser(), encoding="utf-8") as f:
-        content = json.loads(f.readline())["message"]["content"]
-    prompt = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content)
-    job_id = prompt.split("Job: ", 1)[1].split(".", 1)[0]
-    job = json.loads((FACTORY / "jobs" / job_id / "job.json").read_text(encoding="utf-8"))
+    path = event.get("agent_transcript_path") or event.get("transcript_path") or ""
+    found = re.search(r"Job: ([\w-]+)\.", Path(path).expanduser().read_text(encoding="utf-8")) if path else None
+    job_file = FACTORY / "jobs" / (found.group(1) if found else "-") / "job.json"
+    if not job_file.exists():
+        sys.exit(0)  # not a job we can name; the gate still decides
+    job = json.loads(job_file.read_text(encoding="utf-8"))
     code, log, _ = run_checks(job["worktree"])
     if code != 0:
         tail = "\n".join(log.rstrip().splitlines()[-40:])
