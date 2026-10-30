@@ -32,7 +32,7 @@ Limită: garda prinde greșeli, nu rea-voință, iar agenții folosesc contul t�
 
 ## Token limitat
 
-Un token care vede doar acest repo face imposibilă, tehnic, atingerea altui proiect de pe GitHub:
+Un token care vede doar acest repo oprește comenzile `gh` și `git push` date din acest folder să atingă alt proiect de pe GitHub. Nu acoperă comenzile date din alt folder, pe care le oprește doar garda:
 
 1. Pe GitHub: **Settings → Developer settings → Fine-grained tokens → Generate new token**.
 2. La **Repository access** alege doar `Ramanul/software-factory`.
