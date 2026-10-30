@@ -1,0 +1,82 @@
+#!/usr/bin/env python
+"""Ask Argon (Gemini, through the owner's local tool) about a job's diff.
+
+Usage: argon <job-id>
+
+Writes round-N/argon.md, first line `ARGON: REPLIED` or `ARGON: UNAVAILABLE`.
+It always exits 0: Argon informs the approver and never blocks a job. The
+tool's path lives in factory/argon.local.json, which git ignores:
+
+  {"command": ["C:/path/python.exe", "C:/path/consulta_argon.py", "--doar-argon"]}
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+FACTORY = Path(__file__).resolve().parents[1]
+CONFIG = json.loads((FACTORY / "config.json").read_text(encoding="utf-8"))
+LOCAL = FACTORY / "argon.local.json"
+TIMEOUT = 900
+MAX_DIFF = 60000
+# The owner's rule: only this level counts. The tool prints this header, read off the page.
+PROOF = re.compile(r"^\[Argon Maximum, verificat pe pagin[aă]\]:", re.M)
+
+
+def write_request(job, round_dir):
+    res = subprocess.run(["git", "diff", f"origin/{CONFIG['base_branch']}...HEAD"], cwd=job["worktree"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    spec = (FACTORY / "jobs" / job["id"] / "spec.md").read_text(encoding="utf-8")
+    path = round_dir / "argon-request.md"
+    path.write_text(
+        "Revizuiește modificarea de mai jos. Spune ce e greșit și ce ar putea strica. Nu lăuda.\n\n"
+        f"## Spec\n\n{spec}\n\n## Diff\n\n```diff\n{res.stdout[:MAX_DIFF]}\n```\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def ask(command, request):
+    """The reply, or None and the reason."""
+    proc = subprocess.Popen([*command, "--fisier", str(request), "--timeout", "540"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                            errors="replace", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    try:
+        out, err = proc.communicate(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # The tool waits for Gemini's limit to reset, so take its child with it.
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        proc.kill()
+        proc.communicate()
+        return None, f"no reply in {TIMEOUT}s"
+    if proc.returncode != 0:
+        return None, f"exit {proc.returncode}: {(err or out).strip()[-300:]}"
+    if not PROOF.search(out):
+        return None, "the reply has no proof of Argon Maximum, so it doesn't count"
+    return out.strip(), None
+
+
+def main(argv):
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
+    if len(argv) != 1:
+        sys.exit(__doc__.strip())
+    job_id = argv[0]
+    job = json.loads((FACTORY / "jobs" / job_id / "job.json").read_text(encoding="utf-8"))
+    round_dir = FACTORY / "jobs" / job_id / f"round-{job['round']}"
+    if LOCAL.exists():
+        command = json.loads(LOCAL.read_text(encoding="utf-8"))["command"]
+        reply, why = ask(command, write_request(job, round_dir))
+    else:
+        reply, why = None, "factory/argon.local.json doesn't exist"
+    head = "ARGON: REPLIED" if reply else "ARGON: UNAVAILABLE"
+    (round_dir / "argon.md").write_text(f"{head}\n\n{reply or why}\n", encoding="utf-8")
+    print(f"{head} ({job_id} round {job['round']})")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
