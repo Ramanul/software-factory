@@ -55,10 +55,12 @@ def protected_changes(worktree):
     while len(fields) > 1:
         status = fields.pop(0)
         paths = [fields.pop(0) for _ in range(2 if status[0] in "RC" else 1)]
-        if any(matches(p, CONFIG["blocked_paths"]) for p in paths):
-            hits.append(f"{status[0]} {paths[-1]} (blocked)")
-        elif status[0] != "A" and any(matches(p, CONFIG["protected_paths"]) for p in paths):
-            hits.append(f"{status[0]} {paths[0]}")
+        blocked = [p for p in paths if matches(p, CONFIG["blocked_paths"])]
+        protected = [p for p in paths if matches(p, CONFIG["protected_paths"])]
+        if blocked:
+            hits.append(f"{status[0]} {blocked[0]} (blocked)")
+        elif status[0] != "A" and protected:
+            hits.append(f"{status[0]} {protected[0]}")
     return hits
 
 
@@ -109,12 +111,14 @@ def hook():
     event = json.load(sys.stdin)
     if event.get("stop_hook_active"):
         sys.exit(0)  # one nudge per stop; the gate decides
-    path = event.get("agent_transcript_path") or event.get("transcript_path") or ""
-    found = re.search(r"Job: ([\w-]+)\.", Path(path).expanduser().read_text(encoding="utf-8")) if path else None
+    path = Path(event.get("agent_transcript_path") or event.get("transcript_path") or "-").expanduser()
+    found = re.search(r"Job: ([\w-]+)\.", path.read_text(encoding="utf-8", errors="replace")) if path.is_file() else None
     job_file = FACTORY / "jobs" / (found.group(1) if found else "-") / "job.json"
     if not job_file.exists():
         sys.exit(0)  # not a job we can name; the gate still decides
     job = json.loads(job_file.read_text(encoding="utf-8"))
+    if not Path(job["worktree"]).is_dir():
+        sys.exit(0)
     code, log, _ = run_checks(job["worktree"])
     if code != 0:
         tail = "\n".join(log.rstrip().splitlines()[-40:])

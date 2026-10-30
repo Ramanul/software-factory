@@ -21,11 +21,12 @@ DENY = [
     (r"\b(izz-ro|izz\.ro|publimag|nishiai|ramanul\.github\.io)\b", "another project"),
     (r"\b(scp|sftp|rsync|ssh)\b", "copying files to another machine"),
 ]
-PUSH = re.compile(r"\bgit((?:\s+-\S+(?:\s+[^-\s]\S*)?)*)\s+push\b([^|;&\n]*)")
+PUSH = re.compile(r"\bgit\b([^|;&\n]*?)\bpush\b([^|;&\n]*)")
 PLAIN_PUSH = re.compile(r"(?:\s+(?:-u|--set-upstream))?\s+origin\s+factory/[\w./-]+\s*")
 GH = re.compile(r"(?:^|[\s;&|(])gh\s+([^|;&\n]*)")
 GH_ALLOWED = re.compile(r"(pr\s+(create|view|list|diff)|issue\s+(create|view|list))\b")
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+SPINE_FILES = {"job.json", "job.tmp", ".lock"}  # only factory/bin/job writes these
 
 
 def refusal(command):
@@ -33,7 +34,10 @@ def refusal(command):
         if re.search(pattern, command, re.I):
             return why
     for m in PUSH.finditer(command):
-        if m.group(1).strip() or not PLAIN_PUSH.fullmatch(m.group(2)):
+        before = m.group(1).split()
+        if before and not before[0].startswith("-"):
+            continue  # another subcommand that merely says "push", like a commit message
+        if before or not PLAIN_PUSH.fullmatch(m.group(2)):
             return "pushing anything but `git push origin factory/<job-id>`"
     for m in GH.finditer(command):
         if not GH_ALLOWED.match(m.group(1)):
@@ -45,6 +49,8 @@ def outside(path, cwd):
     """True when a subagent's edit lands outside the job worktrees and job folders."""
     target = (Path(cwd or ".") / path).resolve()
     roots = (ROOT.parent / f"{ROOT.name}-factory", ROOT / "factory" / "jobs")
+    if target.name in SPINE_FILES:
+        return True
     return not any(target.is_relative_to(root.resolve()) for root in roots)
 
 

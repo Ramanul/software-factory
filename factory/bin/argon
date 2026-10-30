@@ -12,6 +12,7 @@ tool's path lives in factory/argon.local.json, which git ignores:
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,8 @@ CONFIG = json.loads((FACTORY / "config.json").read_text(encoding="utf-8"))
 LOCAL = FACTORY / "argon.local.json"
 TIMEOUT = 900
 MAX_DIFF = 60000
-PROOF = "Argon Maximum"  # the owner's rule: only this level counts, shown by the tool
+# The owner's rule: only this level counts. The tool prints this header, read off the page.
+PROOF = re.compile(r"^\[Argon Maximum, verificat pe pagin[aă]\]:", re.M)
 
 
 def write_request(job, round_dir):
@@ -53,8 +55,8 @@ def ask(command, request):
         return None, f"no reply in {TIMEOUT}s"
     if proc.returncode != 0:
         return None, f"exit {proc.returncode}: {(err or out).strip()[-300:]}"
-    if PROOF not in out:
-        return None, f"no proof of `{PROOF}` in the reply, so it doesn't count"
+    if not PROOF.search(out):
+        return None, "the reply has no proof of Argon Maximum, so it doesn't count"
     return out.strip(), None
 
 

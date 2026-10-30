@@ -177,7 +177,7 @@ class ArgonTest(Sandbox):
         self.assertIn("răspuns ăîșțâ", self.argon_md())
 
     def test_a_reply_without_proof_of_maximum_does_not_count(self):
-        self.fake_tool('print("raspuns de la alt model")\n')
+        self.fake_tool('print("raspuns care doar pomeneste Argon Maximum")\n')
         self.assertEqual(self.script("argon", "001-test").returncode, 0)
         self.assertTrue(self.argon_md().startswith("ARGON: UNAVAILABLE"))
 
@@ -305,6 +305,8 @@ class GuardTest(unittest.TestCase):
         "git push --delete origin factory/001",
         "git push -d origin factory/001",
         "git -C C:/alt push origin factory/001",
+        'git -C "C:/cale cu spatii" push --force origin main',
+        'git -c "http.extraheader=x y" push origin main',
         "git config remote.origin.url https://github.com/x/y",
         "git config url.https://x.insteadOf https://github.com",
         "gh -R x/y pr merge 1",
@@ -338,6 +340,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.edit("Write", worktree).returncode, 0)
         self.assertEqual(self.edit("Edit", f"{ROOT}/factory/jobs/001-x/build.md").returncode, 0)
         for path in (f"{ROOT}/factory/config.json", f"{ROOT}/.claude/settings.json", "../izz/x.py",
+                     f"{ROOT}/factory/jobs/001-x/job.json",
                      f"{worktree}/../../../elsewhere.py"):
             with self.subTest(path):
                 self.assertEqual(self.edit("Write", path).returncode, 2)
