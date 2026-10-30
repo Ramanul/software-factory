@@ -1,0 +1,50 @@
+#!/usr/bin/env python
+"""PreToolUse hook: stop shell commands that could reach beyond this repo.
+
+Reads the hook event on stdin and exits 2 to block the command. It catches
+mistakes, not an attacker: nothing here deploys, so nothing an agent runs
+should need to publish, change a remote or touch another project.
+"""
+
+import json
+import re
+import sys
+
+DENY = [
+    (r"\b(wrangler|vercel|netlify|firebase|flyctl|heroku|surge|gh-pages|gcloud|aws)\b", "hosting and cloud tools"),
+    (r"\bgh\s+(repo|secret|variable|workflow|run|release|auth|gist|ssh-key|gpg-key|api)\b", "GitHub commands the factory doesn't need"),
+    (r"\bgh\s+pr\s+(merge|close)\b", "merging: only `factory/bin/job merge` merges"),
+    (r"\bgit\b.*\bremote\s+(add|set-url|rename|remove)\b", "changing git remotes"),
+    (r"\b(izz-ro|izz\.ro|publimag|nishiai|ramanul\.github\.io)\b", "another project"),
+    (r"\b(scp|sftp|rsync|ssh)\b", "copying files to another machine"),
+]
+PUSH = re.compile(r"\bgit\b(?:\s+-\S+(?:\s+\S+)?)*\s+push\b(.*)")
+BRANCH = re.compile(r"factory/[\w./-]+")
+
+
+def refusal(command):
+    for pattern, why in DENY:
+        if re.search(pattern, command, re.I):
+            return why
+    for part in re.split(r"&&|\|\||;|\||\n", command):
+        m = PUSH.search(part)
+        if not m:
+            continue
+        args = m.group(1).split()
+        targets = [a for a in args if not a.startswith("-")]
+        forced = any(a.startswith(("--force", "--mirror", "--all", "--tags", "-f")) for a in args)
+        if forced or len(targets) != 2 or targets[0] != "origin" or not BRANCH.fullmatch(targets[1]):
+            return "pushing anything but `git push origin factory/<job-id>`"
+    return None
+
+
+def main():
+    event = json.load(sys.stdin)
+    why = refusal(event.get("tool_input", {}).get("command", ""))
+    if why:
+        print(f"Blocked by factory/bin/guard: {why}.", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
